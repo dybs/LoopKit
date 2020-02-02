@@ -8,7 +8,7 @@
 import os.log
 
 
-extension OSLog {
+public extension OSLog {
     convenience init(category: String) {
         self.init(subsystem: "com.loopkit.LoopKit", category: category)
     }
