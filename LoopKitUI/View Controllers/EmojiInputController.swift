@@ -39,6 +39,11 @@ public class EmojiInputController: UIInputViewController, UICollectionViewDataSo
         }
 
         setupSectionIndex()
+
+        // Scroll to medium absorption
+        DispatchQueue.main.async {
+            self.collectionView.scrollToItem(at: IndexPath(row: 0, section: 1), at: .left, animated: false)
+        }
     }
 
     private func setupSectionIndex() {
@@ -53,10 +58,8 @@ public class EmojiInputController: UIInputViewController, UICollectionViewDataSo
 
     @IBOutlet weak var deleteButton: UIButton! {
         didSet {
-            if #available(iOSApplicationExtension 13.0, *) {
-                let image = UIImage(systemName: "delete.left", compatibleWith: traitCollection)
-                deleteButton.setImage(image, for: .normal)
-            }
+            let image = UIImage(systemName: "delete.left", compatibleWith: traitCollection)
+            deleteButton.setImage(image, for: .normal)
         }
     }
 
@@ -121,7 +124,7 @@ public class EmojiInputController: UIInputViewController, UICollectionViewDataSo
 }
 
 
-public protocol EmojiInputControllerDelegate: class {
+public protocol EmojiInputControllerDelegate: AnyObject {
     func emojiInputControllerDidAdvanceToStandardInputMode(_ controller: EmojiInputController)
 
     func emojiInputControllerDidSelectItemInSection(_ section: Int)

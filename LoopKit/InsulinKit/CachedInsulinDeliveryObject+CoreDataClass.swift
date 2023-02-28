@@ -10,9 +10,7 @@ import Foundation
 import CoreData
 import HealthKit
 
-
 class CachedInsulinDeliveryObject: NSManagedObject {
-
     var reason: HKInsulinDeliveryReason! {
         get {
             willAccessValue(forKey: "reason")
@@ -85,28 +83,67 @@ class CachedInsulinDeliveryObject: NSManagedObject {
         }
     }
 
-    override func awakeFromInsert() {
-        super.awakeFromInsert()
+    var insulinType: InsulinType? {
+        get {
+            willAccessValue(forKey: "insulinType")
+            defer { didAccessValue(forKey: "insulinType") }
+            guard let type = primitiveInsulinType else {
+                return nil
+            }
+            return InsulinType(rawValue: type.intValue)
+        }
+        set {
+            willChangeValue(forKey: "insulinType")
+            defer { didChangeValue(forKey: "insulinType") }
+            primitiveInsulinType = newValue != nil ? NSNumber(value: newValue!.rawValue) : nil
+        }
+    }
+    
+    var automaticallyIssued: Bool? {
+        get {
+            willAccessValue(forKey: "automaticallyIssued")
+            defer { didAccessValue(forKey: "automaticallyIssued") }
+            return primitiveAutomaticallyIssued?.boolValue
+        }
+        set {
+            willChangeValue(forKey: "automaticallyIssued")
+            defer { didChangeValue(forKey: "automaticallyIssued") }
+            primitiveAutomaticallyIssued = newValue != nil ? NSNumber(booleanLiteral: newValue!) : nil
+        }
+    }
 
+    var hasUpdatedModificationCounter: Bool { changedValues().keys.contains("modificationCounter") }
+
+    func updateModificationCounter() { setPrimitiveValue(managedObjectContext!.modificationCounter!, forKey: "modificationCounter") }
+
+    public override func awakeFromInsert() {
+        super.awakeFromInsert()
+        updateModificationCounter()
         createdAt = Date()
+    }
+
+    public override func willSave() {
+        if isUpdated && !hasUpdatedModificationCounter {
+            updateModificationCounter()
+        }
+        super.willSave()
     }
 }
 
+// MARK: - Helpers
 
 extension CachedInsulinDeliveryObject {
     var dose: DoseEntry! {
-        guard let startDate = startDate else {
-            return nil
-        }
-
         let type: DoseType
 
         switch reason! {
         case .basal:
-            if scheduledBasalRate == nil {
-                type = .basal
-            } else {
+            if isSuspend {
+                type = .suspend
+            } else if programmedTempBasalRate != nil {
                 type = .tempBasal
+            } else {
+                type = .basal
             }
         case .bolus:
             type = .bolus
@@ -134,24 +171,88 @@ extension CachedInsulinDeliveryObject {
             endDate: endDate,
             value: doseValue,
             unit: unit,
-            deliveredUnits: deliveredUnits,
+            deliveredUnits: !isMutable ? deliveredUnits : nil,
             description: nil,
             syncIdentifier: syncIdentifier,
-            scheduledBasalRate: scheduledBasalRate
+            scheduledBasalRate: scheduledBasalRate,
+            insulinType: insulinType,
+            automatic: automaticallyIssued,
+            manuallyEntered: manuallyEntered,
+            isMutable: isMutable,
+            wasProgrammedByPumpUI: wasProgrammedByPumpUI
         )
     }
+}
 
-    func update(from sample: HKQuantitySample) {
-        uuid = sample.uuid
-        startDate = sample.startDate
-        endDate = sample.endDate
-        reason = sample.insulinDeliveryReason
-        // External doses might not have a syncIdentifier, so use the UUID
-        syncIdentifier = sample.metadata?[HKMetadataKeySyncIdentifier] as? String ?? sample.uuid.uuidString
-        scheduledBasalRate = sample.scheduledBasalRate
-        programmedTempBasalRate = sample.programmedTempBasalRate
-        hasLoopKitOrigin = sample.hasLoopKitOrigin
-        value = sample.quantity.doubleValue(for: .internationalUnit())
-        provenanceIdentifier = sample.provenanceIdentifier
+extension CachedInsulinDeliveryObject {
+    func create(fromExisting sample: HKQuantitySample, on date: Date = Date()) {
+        self.uuid = sample.uuid
+        self.provenanceIdentifier = sample.provenanceIdentifier
+        self.hasLoopKitOrigin = sample.hasLoopKitOrigin
+        self.startDate = sample.startDate
+        self.endDate = sample.endDate
+        self.syncIdentifier = sample.syncIdentifier ?? sample.uuid.uuidString // External doses might not have a syncIdentifier, so use the UUID
+        self.value = sample.quantity.doubleValue(for: .internationalUnit())
+        self.scheduledBasalRate = sample.scheduledBasalRate
+        self.programmedTempBasalRate = sample.programmedTempBasalRate
+        self.insulinType = sample.insulinType
+        self.automaticallyIssued = sample.automaticallyIssued
+        self.manuallyEntered = sample.manuallyEntered
+        self.isSuspend = sample.isSuspend
+        self.reason = sample.insulinDeliveryReason
+        self.createdAt = date
+    }
+}
+
+extension CachedInsulinDeliveryObject {
+    func create(from entry: DoseEntry, by provenanceIdentifier: String, at date: Date) {
+        assert(entry.type != .resume)
+
+        self.uuid = nil
+        self.provenanceIdentifier = provenanceIdentifier
+        self.hasLoopKitOrigin = true
+        self.startDate = entry.startDate
+        self.endDate = entry.endDate
+        self.syncIdentifier = entry.syncIdentifier
+        self.value = entry.unitsInDeliverableIncrements
+        self.scheduledBasalRate = entry.scheduledBasalRate
+        self.programmedTempBasalRate = (entry.type == .tempBasal) ? HKQuantity(unit: .internationalUnitsPerHour, doubleValue: entry.unitsPerHour) : nil
+        self.reason = (entry.type == .bolus) ? .bolus : .basal
+        self.createdAt = date
+        self.deletedAt = nil
+        self.insulinType = entry.insulinType
+        self.automaticallyIssued = entry.automatic
+        self.manuallyEntered = entry.manuallyEntered
+        self.isSuspend = (entry.type == .suspend)
+        self.isMutable = entry.isMutable
+        self.wasProgrammedByPumpUI = entry.wasProgrammedByPumpUI
+        updateModificationCounter()  // Maintains modificationCounter order
+    }
+
+    func update(from entry: DoseEntry) {
+        assert(entry.type != .resume)
+        // startDate can change when doses split by basal schedule changes are later split by
+        // override enactments/cancels.
+        //assert(entry.startDate == startDate)
+        assert(entry.syncIdentifier == syncIdentifier)
+        if !isMutable {
+            assertionFailure("Attempt to update un-mutable dose: \(self) with \(entry)")
+        }
+
+        self.startDate = entry.startDate
+        self.endDate = entry.endDate
+        self.syncIdentifier = entry.syncIdentifier
+        self.value = entry.unitsInDeliverableIncrements
+        self.scheduledBasalRate = entry.scheduledBasalRate
+        self.programmedTempBasalRate = (entry.type == .tempBasal) ? HKQuantity(unit: .internationalUnitsPerHour, doubleValue: entry.unitsPerHour) : nil
+        self.reason = (entry.type == .bolus) ? .bolus : .basal
+        self.deletedAt = nil
+        self.insulinType = entry.insulinType
+        self.automaticallyIssued = entry.automatic
+        self.manuallyEntered = entry.manuallyEntered
+        self.isSuspend = (entry.type == .suspend)
+        self.isMutable = entry.isMutable
+        self.wasProgrammedByPumpUI = entry.wasProgrammedByPumpUI
+        updateModificationCounter()  // Maintains modificationCounter order
     }
 }

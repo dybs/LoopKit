@@ -27,7 +27,31 @@ public struct PersistedPumpEvent {
     /// The type of pump event
     public let type: PumpEventType?
     /// Whether the pump event is marked mutable
-    public let isMutable: Bool
+    public let automatic: Bool?
+    /// The type of alarm, only valid if type == .alarm
+    public let alarmType: PumpAlarmType?
+
+    public init(date: Date,
+                persistedDate: Date,
+                dose: DoseEntry?,
+                isUploaded: Bool,
+                objectIDURL: URL,
+                raw: Data?,
+                title: String?,
+                type: PumpEventType?,
+                automatic: Bool? = nil,
+                alarmType: PumpAlarmType? = nil) {
+        self.date = date
+        self.persistedDate = persistedDate
+        self.dose = dose
+        self.isUploaded = isUploaded
+        self.objectIDURL = objectIDURL
+        self.raw = raw
+        self.title = title
+        self.type = type
+        self.automatic = automatic
+        self.alarmType = alarmType
+    }
 }
 
 
@@ -42,7 +66,8 @@ extension PumpEvent {
             raw: raw,
             title: title,
             type: type,
-            isMutable: mutable
+            automatic: automatic,
+            alarmType: alarmType
         )
     }
 }

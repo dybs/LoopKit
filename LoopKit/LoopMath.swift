@@ -47,6 +47,35 @@ public enum LoopMath {
     }
 
     /**
+     Calculates a range of time in `delta`-value intervals
+
+     - parameter start:     The range start date
+     - parameter end:       The range end date
+     - parameter delta:     The time differential for items in the returned range
+
+     - returns: An array of dates
+     */
+    public static func simulationDateRange(
+        from start: Date,
+        to end: Date,
+        delta: TimeInterval
+    ) -> [Date] {
+        let flooredStart = start.dateFlooredToTimeInterval(delta)
+        let ceiledEnd = end.dateCeiledToTimeInterval(delta)
+        
+        var output: [Date] = []
+        var curr = flooredStart
+        repeat {
+            output.append(curr)
+            
+            let new = curr.addingTimeInterval(delta)
+            curr = new
+        } while curr <= ceiledEnd
+        
+        return output
+    }
+
+    /**
      Calculates a timeline of predicted glucose values from a variety of effects timelines.
 
      Each effect timeline:
@@ -207,6 +236,28 @@ extension BidirectionalCollection where Element == GlucoseEffect {
         }
 
         return sums.reversed()
+    }
+
+    /// Returns the net effect of the receiver as a GlucoseChange object
+    ///
+    /// Requires the receiver to be sorted chronologically by endDate
+    ///
+    /// - Returns: A single GlucoseChange representing the net effect
+    public func netEffect() -> GlucoseChange? {
+        guard let first = self.first, let last = self.last else {
+            return nil
+        }
+
+        let net = last.quantity.doubleValue(for: .milligramsPerDeciliter) - first.quantity.doubleValue(for: .milligramsPerDeciliter)
+
+        return GlucoseChange(startDate: first.startDate, endDate: last.endDate, quantity: HKQuantity(unit: .milligramsPerDeciliter, doubleValue: net))
+    }
+
+}
+
+extension Sequence where Element: AdditiveArithmetic {
+    func sum() -> Element {
+        return reduce(.zero, +)
     }
 }
 

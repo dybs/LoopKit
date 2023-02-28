@@ -50,6 +50,22 @@ class PumpEvent: NSManagedObject {
             primitiveUnit = newValue?.rawValue
         }
     }
+    
+    var insulinType: InsulinType? {
+        get {
+            willAccessValue(forKey: "insulinType")
+            defer { didAccessValue(forKey: "insulinType") }
+            guard let type = primitiveInsulinType else {
+                return nil
+            }
+            return InsulinType(rawValue: type.intValue)
+        }
+        set {
+            willChangeValue(forKey: "insulinType")
+            defer { didChangeValue(forKey: "insulinType") }
+            primitiveInsulinType = newValue != nil ? NSNumber(value: newValue!.rawValue) : nil
+        }
+    }
 
     var type: PumpEventType? {
         get {
@@ -89,6 +105,19 @@ class PumpEvent: NSManagedObject {
             primitiveValue = newValue != nil ? NSNumber(value: newValue!) : nil
         }
     }
+    
+    var automatic: Bool? {
+        get {
+            willAccessValue(forKey: "automatic")
+            defer { didAccessValue(forKey: "automatic") }
+            return primitiveAutomatic?.boolValue
+        }
+        set {
+            willChangeValue(forKey: "automatic")
+            defer { didChangeValue(forKey: "automatic") }
+            primitiveAutomatic = newValue != nil ? NSNumber(booleanLiteral: newValue!) : nil
+        }
+    }
 
     var deliveredUnits: Double? {
         get {
@@ -103,11 +132,36 @@ class PumpEvent: NSManagedObject {
         }
     }
 
-    override func awakeFromInsert() {
-        super.awakeFromInsert()
+    var alarmType: PumpAlarmType? {
+        get {
+            willAccessValue(forKey: "alarmType")
+            defer { didAccessValue(forKey: "alarmType") }
+            return primitiveAlarmType.map { PumpAlarmType(rawValue: $0) }
+        }
+        set {
+            willChangeValue(forKey: "alarmType")
+            defer { didChangeValue(forKey: "alarmType") }
+            primitiveAlarmType = newValue?.rawValue
+        }
+    }
 
+    var hasUpdatedModificationCounter: Bool { changedValues().keys.contains("modificationCounter") }
+
+    func updateModificationCounter() { setPrimitiveValue(managedObjectContext!.modificationCounter!, forKey: "modificationCounter") }
+
+    public override func awakeFromInsert() {
+        super.awakeFromInsert()
+        updateModificationCounter()
         createdAt = Date()
     }
+
+    public override func willSave() {
+        if isUpdated && !hasUpdatedModificationCounter {
+            updateModificationCounter()
+        }
+        super.willSave()
+    }
+
 }
 
 
@@ -133,7 +187,6 @@ extension PumpEvent: TimelineValue {
 
 
 extension PumpEvent {
-
     var dose: DoseEntry? {
         get {
             // To handle migration, we're requiring any dose to also have a PumpEventType
@@ -148,7 +201,11 @@ extension PumpEvent {
                 value: value,
                 unit: unit,
                 deliveredUnits: deliveredUnits,
-                syncIdentifier: syncIdentifier
+                syncIdentifier: syncIdentifier,
+                insulinType: insulinType,
+                automatic: automatic,
+                isMutable: mutable,
+                wasProgrammedByPumpUI: wasProgrammedByPumpUI
             )
         }
         set {
@@ -162,6 +219,10 @@ extension PumpEvent {
             value = entry.value
             unit = entry.unit
             deliveredUnits = entry.deliveredUnits
+            insulinType = entry.insulinType
+            automatic = entry.automatic
+            mutable = entry.isMutable
+            wasProgrammedByPumpUI = entry.wasProgrammedByPumpUI
         }
     }
 
@@ -172,10 +233,18 @@ extension PumpEvent {
     var isUploaded: Bool {
         return uploaded
     }
-
-    var isMutable: Bool {
-        return mutable
-    }
 }
 
-
+extension PumpEvent {
+    func update(from event: PersistedPumpEvent) {
+        createdAt = event.persistedDate
+        date = event.date
+        type = event.type
+        uploaded = event.isUploaded
+        raw = event.raw
+        title = event.title
+        dose = event.dose
+        automatic = event.automatic
+        alarmType = event.alarmType
+    }
+}

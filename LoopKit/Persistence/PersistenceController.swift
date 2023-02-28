@@ -7,9 +7,11 @@
 
 import CoreData
 import os.log
+import HealthKit
 
 
-public protocol PersistenceControllerDelegate: class {
+
+public protocol PersistenceControllerDelegate: AnyObject {
     /// Informs the delegate that a save operation will start, so it can start a background task on its behalf
     ///
     /// - Parameter controller: The persistence controller
@@ -50,14 +52,6 @@ public final class PersistenceController {
         }
     }
 
-    private enum ReadyState {
-        case waiting
-        case ready
-        case error(PersistenceControllerError)
-    }
-
-    public typealias ReadyCallback = (_ error: PersistenceControllerError?) -> Void
-
     internal let managedObjectContext: NSManagedObjectContext
 
     public let isReadOnly: Bool
@@ -68,32 +62,20 @@ public final class PersistenceController {
 
     private let log = OSLog(category: "PersistenceController")
 
-    /// Initializes a new persistence controller in the specified directory
-    ///
-    /// - Parameters:
-    ///   - directoryURL: The directory where the SQLlite database is stored. Will be created with no file protection if it doesn't exist.
-    ///   - model: The managed object model definition
-    ///   - isReadOnly: Whether the persistent store is intended to be read-only. Read-only stores will observe cross-process notifications and reload all contexts when data changes. Writable stores will post these notifications.
-    public init(
-        directoryURL: URL,
-        model: NSManagedObjectModel = NSManagedObjectModel(contentsOf: Bundle(for: PersistenceController.self).url(forResource: "Model", withExtension: "momd")!)!,
-        isReadOnly: Bool = false
-    ) {
-        managedObjectContext = NSManagedObjectContext(concurrencyType: .privateQueueConcurrencyType)
-        managedObjectContext.mergePolicy = NSMergeByPropertyStoreTrumpMergePolicy
-        managedObjectContext.automaticallyMergesChangesFromParent = true
+    private var queue = DispatchQueue(label: "com.loopkit.PersistenceController", qos: .utility)
 
-        self.directoryURL = directoryURL
-        self.isReadOnly = isReadOnly
-
-        initializeStack(inDirectory: directoryURL, model: model)
+    // MARK: - ReadyState
+    private enum ReadyState {
+        case waiting
+        case ready
+        case error(PersistenceControllerError)
     }
+
+    public typealias ReadyCallback = (_ error: PersistenceControllerError?) -> Void
 
     private var readyCallbacks: [ReadyCallback] = []
 
     private var readyState: ReadyState = .waiting
-
-    private var queue = DispatchQueue(label: "com.loopkit.PersistenceController", qos: .utility)
 
     func onReady(_ callback: @escaping ReadyCallback) {
         queue.async {
@@ -108,26 +90,92 @@ public final class PersistenceController {
         }
     }
 
-    func save(_ completion: ((_ error: PersistenceControllerError?) -> Void)? = nil) {
+    /// Initializes a new persistence controller in the specified directory
+    ///
+    /// - Parameters:
+    ///   - directoryURL: The directory where the SQLlite database is stored. Will be created with no file protection if it doesn't exist.
+    ///   - model: The managed object model definition
+    ///   - isReadOnly: Whether the persistent store is intended to be read-only. Read-only stores will observe cross-process notifications and reload all contexts when data changes. Writable stores will post these notifications.
+    public init(
+        directoryURL: URL,
+        isReadOnly: Bool = false
+    ) {
+        
+        guard let url = Bundle(for: PersistenceController.self).url(forResource: "Model", withExtension: "momd") else {
+            log.error("Could not find Model url")
+            fatalError("Unable to find Model url")
+        }
+        
+        guard let model = NSManagedObjectModel(contentsOf: url) else {
+            log.error("Could not open Model url at %@", String(describing: url))
+            fatalError("Unable to find Model url")
+        }
+        
+        managedObjectContext = NSManagedObjectContext(concurrencyType: .privateQueueConcurrencyType)
+        managedObjectContext.mergePolicy = NSMergeByPropertyStoreTrumpMergePolicy
+        managedObjectContext.automaticallyMergesChangesFromParent = true
+
+        self.directoryURL = directoryURL
+        self.isReadOnly = isReadOnly
+        
+        initializeStack(inDirectory: directoryURL, model: model)
+    }
+
+    @discardableResult
+    func save(_ completion: ((_ error: PersistenceControllerError?) -> Void)? = nil) -> PersistenceControllerError? {
+        var error: PersistenceControllerError?
+
         self.managedObjectContext.performAndWait {
-            guard !self.isReadOnly && self.managedObjectContext.hasChanges else {
+            guard self.managedObjectContext.hasChanges else {
                 completion?(nil)
                 return
             }
 
-            do {
-                delegate?.persistenceControllerWillSave(self)
-                try self.managedObjectContext.save()
-                delegate?.persistenceControllerDidSave(self, error: nil)
-                completion?(nil)
-            } catch let saveError as NSError {
-                self.log.error("Error while saving context: %{public}", saveError)
-                delegate?.persistenceControllerDidSave(self, error: .coreDataError(saveError))
-                completion?(.coreDataError(saveError))
-            }
+            error = self.saveInternal()
+            completion?(error)
+        }
+        
+        return error
+    }
+    
+    // Should only be called from managedObjectContext thread
+    internal func saveInternal() -> PersistenceControllerError? {
+        guard !self.isReadOnly else {
+            return nil
+        }
+
+        do {
+            delegate?.persistenceControllerWillSave(self)
+            try self.managedObjectContext.save()
+            delegate?.persistenceControllerDidSave(self, error: nil)
+            return nil
+        } catch let saveError as NSError {
+            self.log.error("Error while saving context: %{public}@", saveError)
+            delegate?.persistenceControllerDidSave(self, error: .coreDataError(saveError))
+            return .coreDataError(saveError)
         }
     }
 
+
+    // Should only be called on managedObjectContext thread
+    func updateMetadata(key: String, value: Any?) {
+        if let coordinator = self.managedObjectContext.persistentStoreCoordinator, let store = coordinator.persistentStores.first {
+            var metadata = coordinator.metadata(for: store)
+            metadata[key] = value
+            coordinator.setMetadata(metadata, for: store)
+        }
+    }
+    
+    // Should only be called on managedObjectContext thread
+    func fetchMetadata(key: String) -> Any? {
+        if let coordinator = self.managedObjectContext.persistentStoreCoordinator, let store = coordinator.persistentStores.first {
+            let metadata = coordinator.metadata(for: store)
+            return metadata[key]
+        } else {
+            return nil
+        }
+    }
+    
     // MARK: - 
 
     private func initializeStack(inDirectory directoryURL: URL, model: NSManagedObjectModel) {
@@ -138,26 +186,28 @@ public final class PersistenceController {
 
             self.managedObjectContext.persistentStoreCoordinator = coordinator
 
-            if !FileManager.default.fileExists(atPath: directoryURL.absoluteString) {
-                do {
-                    try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true, attributes: [FileAttributeKey.protectionKey: FileProtectionType.none])
-                } catch {
-                    // Ignore errors here, let Core Data explain the problem
-                }
+            do {
+                try FileManager.default.ensureDirectoryExists(at: directoryURL, with: FileProtectionType.completeUntilFirstUserAuthentication)
+            } catch {
+                // Ignore errors here, let Core Data explain the problem
             }
 
             let storeURL = directoryURL.appendingPathComponent("Model.sqlite")
+
+            var options: [AnyHashable : Any] = [
+                NSMigratePersistentStoresAutomaticallyOption: true,
+                NSInferMappingModelAutomaticallyOption: true
+            ]
+            
+#if os(iOS)
+            options[NSPersistentStoreFileProtectionKey] = FileProtectionType.completeUntilFirstUserAuthentication
+#endif
 
             do {
                 try coordinator.addPersistentStore(ofType: NSSQLiteStoreType,
                     configurationName: nil,
                     at: storeURL,
-                    options: [
-                        NSMigratePersistentStoresAutomaticallyOption: true,
-                        NSInferMappingModelAutomaticallyOption: true,
-                        // Data should be available on reboot before first unlock
-                        NSPersistentStoreFileProtectionKey: FileProtectionType.none
-                    ]
+                    options: options
                 )
             } catch let storeError as NSError {
                 self.log.error("Failed to initialize persistenceController: %{public}@", storeError)
@@ -191,4 +241,58 @@ extension PersistenceController: CustomDebugStringConvertible {
             "* persistenceStoreCoordinator: \(String(describing: managedObjectContext.persistentStoreCoordinator))",
         ].joined(separator: "\n")
     }
+}
+
+
+// MARK: - Anchor store/fetch helpers
+
+extension PersistenceController {
+    func storeAnchor(_ anchor: HKQueryAnchor?, key: String) {
+        managedObjectContext.perform {
+            let encoded: Data?
+            if let anchor = anchor {
+                encoded = try? NSKeyedArchiver.archivedData(withRootObject: anchor, requiringSecureCoding: true)
+                if encoded == nil {
+                    self.log.error("Encoding anchor %{public} failed.", String(describing: anchor))
+                }
+            } else {
+                encoded = nil
+            }
+            self.updateMetadata(key: key, value: encoded)
+            let _ = self.saveInternal()
+        }
+    }
+    
+    func fetchAnchor(key: String, completion: @escaping (HKQueryAnchor?) -> Void) {
+        managedObjectContext.perform {
+            let value = self.fetchMetadata(key: key)
+            if let encoded = value as? Data {
+                let anchor = try? NSKeyedUnarchiver.unarchivedObject(ofClass: HKQueryAnchor.self, from: encoded)
+                if anchor == nil {
+                    self.log.error("Decoding anchor from %{public}@ failed.", String(describing: encoded))
+                }
+                completion(anchor)
+            } else {
+                self.log.error("Anchor metadata invalid %{public}@.", String(describing: value))
+                completion(nil)
+            }
+        }
+    }
+}
+
+fileprivate extension FileManager {
+    
+    func ensureDirectoryExists(at url: URL, with protectionType: FileProtectionType? = nil) throws {
+        try createDirectory(at: url, withIntermediateDirectories: true, attributes: protectionType.map { [FileAttributeKey.protectionKey: $0 ] })
+        guard let protectionType = protectionType else {
+            return
+        }
+        // double check protection type
+        var attrs = try attributesOfItem(atPath: url.path)
+        if attrs[FileAttributeKey.protectionKey] as? FileProtectionType != protectionType {
+            attrs[FileAttributeKey.protectionKey] = protectionType
+            try setAttributes(attrs, ofItemAtPath: url.path)
+        }
+    }
+ 
 }

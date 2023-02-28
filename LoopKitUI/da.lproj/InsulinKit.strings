@@ -11,7 +11,7 @@
 "dZi-Ta-IHm.text" = "E IOB";
 
 /* Class = "UILabel"; text = "No pump configured"; ObjectID = "jSc-64-2tZ"; */
-"jSc-64-2tZ.text" = "Ingen pumpe indstillet";
+"jSc-64-2tZ.text" = "Ingen pumpe konfigureret";
 
 /* Class = "UILabel"; text = "U Total"; ObjectID = "kys-by-14s"; */
 "kys-by-14s.text" = "E Total";
@@ -23,8 +23,11 @@
 "TyZ-xm-mVN.segmentTitles[0]" = "Reservoir";
 
 /* Class = "UISegmentedControl"; TyZ-xm-mVN.segmentTitles[1] = "Event History"; ObjectID = "TyZ-xm-mVN"; */
-"TyZ-xm-mVN.segmentTitles[1]" = "Historik";
+"TyZ-xm-mVN.segmentTitles[1]" = "Event-log";
+
+/* Class = "UISegmentedControl"; TyZ-xm-mVN.segmentTitles[2] = "Non-Pump Insulin"; ObjectID = "TyZ-xm-mVN"; */
+"TyZ-xm-mVN.segmentTitles[2]" = "Ikke-pumpe insulin";
 
 /* Class = "UINavigationItem"; title = "Insulin Delivery"; ObjectID = "vls-EW-uwI"; */
-"vls-EW-uwI.title" = "Insulin Indgivelse";
+"vls-EW-uwI.title" = "Insulintilførsel";
 

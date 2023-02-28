@@ -15,13 +15,19 @@ public struct GlucoseFixtureValue: GlucoseSampleValue {
     public let startDate: Date
     public let quantity: HKQuantity
     public let isDisplayOnly: Bool
+    public let wasUserEntered: Bool
     public let provenanceIdentifier: String
+    public let condition: GlucoseCondition?
+    public let trendRate: HKQuantity?
 
-    public init(startDate: Date, quantity: HKQuantity, isDisplayOnly: Bool, provenanceIdentifier: String?) {
+    public init(startDate: Date, quantity: HKQuantity, isDisplayOnly: Bool, wasUserEntered: Bool, provenanceIdentifier: String?, condition: GlucoseCondition?, trendRate: HKQuantity?) {
         self.startDate = startDate
         self.quantity = quantity
         self.isDisplayOnly = isDisplayOnly
+        self.wasUserEntered = wasUserEntered
         self.provenanceIdentifier = provenanceIdentifier ?? "com.loopkit.LoopKitTests"
+        self.condition = condition
+        self.trendRate = trendRate
     }
 }
 
@@ -33,9 +39,12 @@ extension GlucoseFixtureValue: Comparable {
 
     public static func ==(lhs: GlucoseFixtureValue, rhs: GlucoseFixtureValue) -> Bool {
         return lhs.startDate == rhs.startDate &&
-               lhs.quantity == rhs.quantity &&
-               lhs.isDisplayOnly == rhs.isDisplayOnly &&
-               lhs.provenanceIdentifier == rhs.provenanceIdentifier
+            lhs.quantity == rhs.quantity &&
+            lhs.isDisplayOnly == rhs.isDisplayOnly &&
+            lhs.wasUserEntered == rhs.wasUserEntered &&
+            lhs.provenanceIdentifier == rhs.provenanceIdentifier &&
+            lhs.condition == rhs.condition &&
+            lhs.trendRate == rhs.trendRate
     }
 }
 
@@ -69,7 +78,10 @@ class GlucoseMathTests: XCTestCase {
                 startDate: dateFormatter.date(from: $0["date"] as! String)!,
                 quantity: HKQuantity(unit: HKUnit.milligramsPerDeciliter, doubleValue: $0["amount"] as! Double),
                 isDisplayOnly: ($0["display_only"] as? Bool) ?? false,
-                provenanceIdentifier: $0["provenance_identifier"] as? String
+                wasUserEntered: ($0["user_entered"] as? Bool) ?? false,
+                provenanceIdentifier: $0["provenance_identifier"] as? String,
+                condition: ($0["condition"] as? String).flatMap { GlucoseCondition(rawValue: $0) },
+                trendRate: ($0["trend_rate"] as? Double).flatMap { HKQuantity(unit: .milligramsPerDeciliter, doubleValue: $0) }
             )
         }
     }
@@ -285,5 +297,20 @@ class GlucoseMathTests: XCTestCase {
         let effects = input.counteractionEffects(to: insulinEffect)
 
         XCTAssertEqual(output.count, effects.count)
+    }
+    
+    func testMomentumEffectWithVelocityLimit() {
+        let input = loadInputFixture("momentum_effect_impossible_rising_glucose_input")
+        let output = loadOutputFixture("momentum_effect_impossible_rising_glucose_output")
+
+        let effects = input.linearMomentumEffect()
+        let unit = HKUnit.milligramsPerDeciliter
+
+        XCTAssertEqual(output.count, effects.count)
+
+        for (expected, calculated) in zip(output, effects) {
+            XCTAssertEqual(expected.startDate, calculated.startDate)
+            XCTAssertEqual(expected.quantity.doubleValue(for: unit), calculated.quantity.doubleValue(for: unit), accuracy: Double(Float.ulpOfOne))
+        }
     }
 }

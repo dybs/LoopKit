@@ -36,6 +36,25 @@ public enum GlucoseTrend: Int, CaseIterable {
             return "⇊"
         }
     }
+    
+    public var arrows: String {
+        switch self {
+        case .upUpUp:
+            return "↑↑"
+        case .upUp:
+            return "↑"
+        case .up:
+            return "↗︎"
+        case .flat:
+            return "→"
+        case .down:
+            return "↘︎"
+        case .downDown:
+            return "↓"
+        case .downDownDown:
+            return "↓↓"
+        }
+    }
 
     public var localizedDescription: String {
         switch self {
@@ -53,6 +72,29 @@ public enum GlucoseTrend: Int, CaseIterable {
             return LocalizedString("Falling fast", comment: "Glucose trend down-down")
         case .downDownDown:
             return LocalizedString("Falling very fast", comment: "Glucose trend down-down-down")
+        }
+    }
+}
+
+extension GlucoseTrend {
+    public init?(symbol: String) {
+        switch symbol {
+        case "↑↑":
+            self = .upUpUp
+        case "↑":
+            self = .upUp
+        case "↗︎":
+            self = .up
+        case "→":
+            self = .flat
+        case "↘︎":
+            self = .down
+        case "↓":
+            self = .downDown
+        case "↓↓":
+            self = .downDownDown
+        default:
+            return nil
         }
     }
 }

@@ -23,8 +23,6 @@ public enum HealthKitSampleStoreResult<T> {
 
 
 public class HealthKitSampleStore {
-    /// Describes the source of an update notification. Value is of type `UpdateSource.RawValue`
-    public static let notificationUpdateSourceKey = "com.loopkit.UpdateSource"
 
     public enum StoreError: Error {
         case authorizationDenied
@@ -36,6 +34,12 @@ public class HealthKitSampleStore {
 
     /// The health store used for underlying queries
     public let healthStore: HKHealthStore
+    
+    /// Whether the store should fetch data that was written to HealthKit from current app
+    private let observeHealthKitSamplesFromCurrentApp: Bool
+
+    /// Whether the store should fetch data that was written to HealthKit from other apps
+    private let observeHealthKitSamplesFromOtherApps: Bool
 
     /// Whether the store is observing changes to types
     public let observationEnabled: Bool
@@ -43,34 +47,49 @@ public class HealthKitSampleStore {
     /// For unit testing only.
     internal var testQueryStore: HKSampleQueryTestable?
 
+    /// Current date. Will return the unit-test configured date if set, or the current date otherwise.
+    internal var currentDate: Date {
+        test_currentDate ?? Date()
+    }
+    
     /// Allows for controlling uses of the system date in unit testing
     internal var test_currentDate: Date?
 
     internal func currentDate(timeIntervalSinceNow: TimeInterval = 0) -> Date {
-        let date = test_currentDate ?? Date()
-        return date.addingTimeInterval(timeIntervalSinceNow)
+        return currentDate.addingTimeInterval(timeIntervalSinceNow)
+    }
+    
+    /// Declaring this as a var allows unit test to inject a mock for HKObserverQuery
+    internal var createObserverQuery: (HKSampleType, NSPredicate?, @escaping (HKObserverQuery, @escaping HKObserverQueryCompletionHandler, Error?) -> Void) -> HKObserverQuery = { (sampleType, predicate, updateHandler) in
+        return HKObserverQuery(sampleType: sampleType, predicate: predicate, updateHandler: updateHandler)
+    }
+    
+    /// Allows unit test to inject a mock for HKAnchoredObjectQuery
+    internal var createAnchoredObjectQuery: (HKSampleType, NSPredicate?, HKQueryAnchor?, Int, @escaping (HKAnchoredObjectQuery, [HKSample]?, [HKDeletedObject]?, HKQueryAnchor?, Error?) -> Void) -> HKAnchoredObjectQuery = { (sampleType, predicate, anchor, limit, resultsHandler) in
+        return HKAnchoredObjectQuery(type: sampleType, predicate: predicate, anchor: anchor, limit: limit, resultsHandler: resultsHandler)
     }
 
     private let log: OSLog
 
     public init(
         healthStore: HKHealthStore,
+        observeHealthKitSamplesFromCurrentApp: Bool = true,
+        observeHealthKitSamplesFromOtherApps: Bool = true,
         type: HKSampleType,
         observationStart: Date,
         observationEnabled: Bool,
         test_currentDate: Date? = nil
     ) {
         self.healthStore = healthStore
+        self.observeHealthKitSamplesFromCurrentApp = observeHealthKitSamplesFromCurrentApp
+        self.observeHealthKitSamplesFromOtherApps = observeHealthKitSamplesFromOtherApps
         self.sampleType = type
         self.observationStart = observationStart
         self.observationEnabled = observationEnabled
         self.test_currentDate = test_currentDate
+        self.lockedQueryAnchor = Locked<HKQueryAnchor?>(nil)
 
         self.log = OSLog(category: String(describing: Swift.type(of: self)))
-
-        if !authorizationRequired {
-            createQuery()
-        }
     }
 
     deinit {
@@ -88,11 +107,13 @@ public class HealthKitSampleStore {
     ///
     /// - Parameters:
     ///   - toShare: Whether to request write authorization. Defaults to true.
+    ///   - read: Whether to request read authorization. Defaults to true.
     ///   - completion: A closure called after the authorization is completed
     ///   - result: The authorization result
-    public func authorize(toShare: Bool = true, _ completion: @escaping (_ result: HealthKitSampleStoreResult<Bool>) -> Void) {
-        healthStore.requestAuthorization(toShare: toShare ? [sampleType] : [], read: [sampleType]) { (completed, error) -> Void in
+    public func authorize(toShare: Bool = true, read: Bool = true, _ completion: @escaping (_ result: HealthKitSampleStoreResult<Bool>) -> Void) {
+        healthStore.requestAuthorization(toShare: toShare ? [sampleType] : [], read: read ? [sampleType] : []) { (completed, error) -> Void in
             if completed && !self.sharingDenied {
+                self.log.default("Authorize completed: creating HK query")
                 self.createQuery()
                 completion(.success(true))
             } else {
@@ -106,21 +127,26 @@ public class HealthKitSampleStore {
                 
                 completion(.failure(authError))
             }
-            
+
             NotificationCenter.default.post(name: .StoreAuthorizationStatusDidChange, object: self)
+
+            // Do not remove this log: it actually triggers a query by calling preferredUnit, and can update the cache
+            // And trigger a unit change notification after authorization happens.
+            self.log.default("Checking units after authorization: %{public}@", String(describing: self.preferredUnit))
         }
     }
 
     // MARK: - Query support
 
     /// The active observer query
-    private var observerQuery: HKObserverQuery? {
+    internal var observerQuery: HKObserverQuery? {
         didSet {
             if let query = oldValue {
                 healthStore.stop(query)
             }
 
             if let query = observerQuery {
+                log.debug("Executing observerQuery %@", query)
                 healthStore.execute(query)
             }
         }
@@ -131,41 +157,102 @@ public class HealthKitSampleStore {
         didSet {
             // If we are now looking farther back, then reset the query
             if oldValue > observationStart {
+                log.default("observationStart changed: creating HK query")
                 createQuery()
             }
         }
     }
 
     /// The last-retreived anchor from an anchored object query
-    private var queryAnchor: HKQueryAnchor?
+    internal var queryAnchor: HKQueryAnchor? {
+        get {
+            return lockedQueryAnchor.value
+        }
+        set {
+            var changed: Bool = false
+            lockedQueryAnchor.mutate { (anchor) in
+                if anchor != newValue {
+                    anchor = newValue
+                    changed = true
+                }
+            }
+            if changed {
+                queryAnchorDidChange()
+            }
+        }
+    }
+    private let lockedQueryAnchor: Locked<HKQueryAnchor?>
+
+    func queryAnchorDidChange() {
+        // Subclasses can override
+    }
 
     /// Called in response to an update by the observer query
     ///
     /// - Parameters:
     ///   - query: The query which triggered the update
     ///   - error: An error during the update, if one occurred
-    internal func observeUpdates(to query: HKObserverQuery, error: Error?) {
-        guard error == nil else {
-            log.error("%@ notified with changes with error: %{public}@", query, String(describing: error))
+    internal final func observerQueryHandler(query: HKObserverQuery, observerQueryCompletionHandler: @escaping HKObserverQueryCompletionHandler, error: Error?) {
+
+        if let error = error {
+            log.error("Observer query %{public}@ notified of error: %{public}@", query, String(describing: error))
+            observerQueryCompletionHandler()
             return
         }
+        
+        log.default("%{public}@ notified with changes. Fetching from: %{public}@", query, queryAnchor.map(String.init(describing:)) ?? "0")
+        executeAnchorQuery(observerQuery: query, observerQueryCompletionHandler: observerQueryCompletionHandler)
+    }
 
-        let anchoredObjectQuery = HKAnchoredObjectQuery(
-            type: self.sampleType,
-            predicate: query.predicate,
-            anchor: self.queryAnchor,
-            limit: HKObjectQueryNoLimit
-        ) { (query, newSamples, deletedSamples, anchor, error) in
-            self.log.debug("%@: new: %d deleted: %d anchor: %@ error: %@", #function, newSamples?.count ?? 0, deletedSamples?.count ?? 0, String(describing: anchor), String(describing: error))
+    internal final func executeAnchorQuery(observerQuery: HKObserverQuery, observerQueryCompletionHandler: @escaping HKObserverQueryCompletionHandler) {
+
+        let batchSize = 500
+        
+        let anchoredObjectQuery = createAnchoredObjectQuery(sampleType, observerQuery.predicate, queryAnchor, batchSize) { [weak self] (query, newSamples, deletedSamples, anchor, error) in
 
             if let error = error {
-                self.log.error("%@: error executing anchoredObjectQuery: %@", String(describing: type(of: self)), error.localizedDescription)
+                self?.log.error("HKQuery: Error from anchoredObjectQuery: anchor: %{public}@ error: %{public}@", String(describing: anchor), String(describing: error))
+                observerQueryCompletionHandler()
+                return
             }
 
-            self.processResults(from: query, added: newSamples ?? [], deleted: deletedSamples ?? [], error: error)
-            self.queryAnchor = anchor
+            guard let newSamples else {
+                self?.log.error("HKQuery: Error from anchoredObjectQuery: newSamples is nil")
+                observerQueryCompletionHandler()
+                return
+            }
+
+            guard let deletedSamples else {
+                self?.log.error("HKQuery: Error from anchoredObjectQuery: deletedSamples is nil")
+                observerQueryCompletionHandler()
+                return
+            }
+
+            guard let anchor = anchor else {
+                self?.log.error("HKQuery: anchoredObjectQueryResultsHandler called with no anchor")
+                observerQueryCompletionHandler()
+                return
+            }
+
+            self?.log.default("AnchorQuery results new: %{public}d deleted: %{public}d anchor: %{public}@", newSamples.count, deletedSamples.count, anchor.description)
+
+            self?.processResults(from: query, added: newSamples, deleted: deletedSamples, anchor: anchor) { (success) in
+                if success {
+                    // Do not advance anchor if we failed to update local cache
+                    self?.queryAnchor = anchor
+
+                    if newSamples.count + deletedSamples.count >= batchSize {
+                        self?.executeAnchorQuery(observerQuery: observerQuery, observerQueryCompletionHandler: observerQueryCompletionHandler)
+                    } else {
+                        observerQueryCompletionHandler()
+                    }
+                } else {
+                    observerQueryCompletionHandler()
+                }
+            }
         }
 
+        log.default("HKQuery: Executing anchored object query")
         healthStore.execute(anchoredObjectQuery)
     }
 
@@ -176,8 +263,9 @@ public class HealthKitSampleStore {
     ///   - added: An array of samples added
     ///   - deleted: An array of samples deleted
     ///   - error: An error from the query, if one occurred
-    internal func processResults(from query: HKAnchoredObjectQuery, added: [HKSample], deleted: [HKDeletedObject], error: Error?) {
+    internal func processResults(from query: HKAnchoredObjectQuery, added: [HKSample], deleted: [HKDeletedObject], anchor: HKQueryAnchor, completion: @escaping (Bool) -> Void) {
         // To be overridden
+        completion(true)
     }
 
     /// The preferred unit for the sample type
@@ -209,21 +297,51 @@ extension HealthKitSampleStore: HKSampleQueryTestable {
 }
 
 
+// MARK: - Query
+extension HealthKitSampleStore {
+    internal func predicateForSamples(withStart startDate: Date?, end endDate: Date?, options: HKQueryOptions = []) -> NSPredicate? {
+        guard observeHealthKitSamplesFromCurrentApp || observeHealthKitSamplesFromOtherApps else {
+            return nil
+        }
+
+        // Initial predicate is just the date range
+        var predicate = HKQuery.predicateForSamples(withStart: startDate, end: endDate, options: options)
+
+        // If we don't want samples from the current app, then only query samples NOT from the default HKSource
+        if !observeHealthKitSamplesFromCurrentApp {
+            predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [predicate, NSCompoundPredicate(notPredicateWithSubpredicate: HKQuery.predicateForObjects(from: HKSource.default()))])
+
+        // Othewrise, if we don't want samples from other apps, then only query samples from the default HKSource
+        } else if !observeHealthKitSamplesFromOtherApps {
+            predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [predicate, HKQuery.predicateForObjects(from: HKSource.default())])
+        }
+
+        return predicate
+    }
+}
+
+
 // MARK: - Observation
 extension HealthKitSampleStore {
-    private func createQuery() {
+    internal func createQuery() {
+        log.debug("%@ [sampleType: %@]", #function, sampleType)
         log.debug("%@ [observationEnabled: %d]", #function, observationEnabled)
+        log.debug("%@ [observeHealthKitSamplesFromCurrentApp: %d]", #function, observeHealthKitSamplesFromCurrentApp)
+        log.debug("%@ [observeHealthKitSamplesFromOtherApps: %d]", #function, observeHealthKitSamplesFromOtherApps)
+        log.debug("%@ [observationStart: %@]", #function, String(describing: observationStart))
 
         guard observationEnabled else {
             return
         }
 
-        let predicate = HKQuery.predicateForSamples(withStart: observationStart, end: nil)
+        guard let predicate = predicateForSamples(withStart: observationStart, end: nil) else {
+            return
+        }
 
-        observerQuery = HKObserverQuery(sampleType: sampleType, predicate: predicate) { [weak self] (query, completionHandler, error) in
-            self?.observeUpdates(to: query, error: error)
-
-            completionHandler()
+        // Assigning observerQuery here starts the query
+        observerQuery = createObserverQuery(sampleType, predicate) { [weak self] (query, completionHandler, error) in
+            // This is the HKObserverQueryCompletionHandler
+            self?.observerQueryHandler(query: query, observerQueryCompletionHandler: completionHandler, error: error)
         }
 
         enableBackgroundDelivery { (result) in
@@ -231,10 +349,11 @@ extension HealthKitSampleStore {
             case .failure(let error):
                 self.log.error("Error enabling background delivery: %@", error.localizedDescription)
             case .success:
-                self.log.debug("Enabled background delivery for %@", self.sampleType)
+                self.log.default("Enabled background delivery for %{public}@", self.sampleType)
             }
         }
     }
+
 
     /// Enables the immediate background delivery of updates to samples from HealthKit.
     ///
@@ -281,6 +400,11 @@ extension HealthKitSampleStore {
 // MARK: - HKHealthStore helpers
 extension HealthKitSampleStore {
     
+    /// True if the user has explicitly authorized access to any required share types
+    public var sharingAuthorized: Bool {
+        return healthStore.authorizationStatus(for: sampleType) == .sharingAuthorized
+    }
+
     /// True if the user has explicitly denied access to any required share types
     public var sharingDenied: Bool {
         return healthStore.authorizationStatus(for: sampleType) == .sharingDenied
