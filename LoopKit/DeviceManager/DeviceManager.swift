@@ -15,9 +15,11 @@ public protocol DeviceManagerDelegate {
                               trigger: UNNotificationTrigger?)
 
     func clearNotification(for manager: DeviceManager, identifier: String)
+    
+    func deviceManager(_ manager: DeviceManager, logEventForDeviceIdentifier deviceIdentifier: String?, type: DeviceLogEntryType, message: String, completion: ((Error?) -> Void)?)
 }
 
-public protocol DeviceManager: class, CustomDebugStringConvertible {
+public protocol DeviceManager: AnyObject, CustomDebugStringConvertible {
     typealias RawStateValue = [String: Any]
 
     /// The identifier of the manager. This should be unique
