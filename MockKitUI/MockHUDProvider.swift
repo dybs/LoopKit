@@ -9,12 +9,12 @@
 import LoopKit
 import LoopKitUI
 import MockKit
-
+import Foundation
 
 final class MockHUDProvider: NSObject, HUDProvider {
 
     var managerIdentifier: String {
-        return MockPumpManager.managerIdentifier
+        return MockPumpManager.pluginIdentifier
     }
 
     private var pumpManager: MockPumpManager

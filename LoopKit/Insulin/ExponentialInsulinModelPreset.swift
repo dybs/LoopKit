@@ -5,6 +5,8 @@
 //  Copyright © 2017 LoopKit Authors. All rights reserved.
 //
 
+import Foundation
+
 public enum ExponentialInsulinModelPreset: String, Codable {
     case rapidActingAdult
     case rapidActingChild
@@ -79,6 +81,6 @@ extension ExponentialInsulinModelPreset: InsulinModel {
 
 extension ExponentialInsulinModelPreset: CustomDebugStringConvertible {
     public var debugDescription: String {
-        return "\(self.rawValue)(\(String(reflecting: model))"
+        return "\(self.rawValue)(\(String(reflecting: model)))"
     }
 }
